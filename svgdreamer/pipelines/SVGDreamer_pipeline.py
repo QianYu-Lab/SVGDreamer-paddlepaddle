@@ -4,30 +4,34 @@
 # Description:
 import os
 import pathlib
-from PIL import Image
-from typing import AnyStr, Union, Tuple, List
+from typing import AnyStr, List, Tuple, Union
 
-import cv2
 import cairosvg
-import omegaconf
+import cv2
 import numpy as np
-from tqdm.auto import tqdm
+import omegaconf
+import paddle
+import paddle.nn.functional as F_P
 import torch
 import torch.nn.functional as F
-from torch.optim.lr_scheduler import LambdaLR
 import torchvision
-from torchvision import transforms
+from PIL import Image
 from skimage.color import rgb2gray
-
-from svgdreamer.libs import ModelState, get_optimizer
-from svgdreamer.painter import (CompPainter, CompPainterOptimizer, xing_loss_fn, Painter, PainterOptimizer,
-                                CosineWithWarmupLRLambda, VectorizedParticleSDSPipeline, DiffusionPipeline)
-from svgdreamer.token2attn.attn_control import EmptyControl, AttentionStore
-from svgdreamer.token2attn.ptp_utils import view_images
-from svgdreamer.utils.plot import plot_img, plot_couple, plot_attn, save_image
-from svgdreamer.utils import init_tensor_with_color, AnyPath, mkdir
-from svgdreamer.svgtools import merge_svg_files, is_valid_svg
 from svgdreamer.diffusers_warp import model2res
+from svgdreamer.libs import ModelState, get_optimizer
+from svgdreamer.painter import (CompPainter, CompPainterOptimizer,
+                                CosineWithWarmupLRLambda, DiffusionPipeline,
+                                DiffusionPipeline_Paddle, Painter,
+                                PainterOptimizer,
+                                VectorizedParticleSDSPipeline, xing_loss_fn)
+from svgdreamer.svgtools import is_valid_svg, merge_svg_files
+from svgdreamer.token2attn.attn_control import AttentionStore, EmptyControl
+from svgdreamer.token2attn.ptp_utils import view_images
+from svgdreamer.utils import AnyPath, init_tensor_with_color, mkdir
+from svgdreamer.utils.plot import plot_attn, plot_couple, plot_img, save_image
+from torch.optim.lr_scheduler import LambdaLR
+from torchvision import transforms
+from tqdm.auto import tqdm
 
 import ImageReward as RM
 
@@ -98,6 +102,7 @@ class SVGDreamerPipeline(ModelState):
         # log prompts
         self.print(f"prompt: {text_prompt}")
         self.print(f"neg_prompt: {self.args.neg_prompt}\n")
+        paddle.set_device(self.p_device)
 
         if self.args.skip_sive:
             # mode 1: optimization with VPSD from scratch
@@ -125,6 +130,7 @@ class SVGDreamerPipeline(ModelState):
     def SIVE_stage(self, text_prompt: str):
         # init diffusion model
         pipeline = DiffusionPipeline(self.x_cfg.sive_model_cfg, self.args.diffuser, self.device)
+        pipeline_paddle = DiffusionPipeline_Paddle(self.x_cfg.sive_model_cfg, self.args.diffuser, self.p_device)
 
         merged_svg_paths = []
         merged_images = []
@@ -133,7 +139,7 @@ class SVGDreamerPipeline(ModelState):
             # generate sample and attention map
             fg_attn_map, bg_attn_map, controller = self.extract_ldm_attn(i,
                                                                          self.x_cfg.sive_model_cfg,
-                                                                         pipeline,
+                                                                         pipeline_paddle,
                                                                          text_prompt,
                                                                          select_sample_path,
                                                                          self.sive_cfg.attn_cfg,
@@ -208,6 +214,7 @@ class SVGDreamerPipeline(ModelState):
 
         # free the VRAM
         del pipeline
+        del pipeline_paddle
         torch.cuda.empty_cache()
         # update paths
         self.x_cfg.num_paths = self.sive_cfg.bg.num_paths + self.sive_cfg.fg.num_paths
@@ -757,7 +764,7 @@ class SVGDreamerPipeline(ModelState):
     def extract_ldm_attn(self,
                          iter: int,
                          model_cfg: omegaconf.DictConfig,
-                         pipeline: DiffusionPipeline,
+                         pipeline: DiffusionPipeline_Paddle,
                          prompts: str,
                          gen_sample_path: AnyPath,
                          attn_init_cfg: omegaconf.DictConfig,
@@ -778,8 +785,7 @@ class SVGDreamerPipeline(ModelState):
                                   num_inference_steps=model_cfg.num_inference_steps,
                                   controller=controller,
                                   guidance_scale=model_cfg.guidance_scale,
-                                  negative_prompt=self.args.neg_prompt,
-                                  generator=self.g_device)
+                                  negative_prompt=self.args.neg_prompt)
         outputs_np = [np.array(img) for img in outputs.images]
         view_images(outputs_np, save_image=True, fp=gen_sample_path)
         self.print(f"select_sample shape: {outputs_np[0].shape}")
@@ -801,12 +807,14 @@ class SVGDreamerPipeline(ModelState):
             self.print(f"select cross_attn_map shape: {cross_attn_map.shape}")
             cross_attn_map = 255 * cross_attn_map / cross_attn_map.max()
             # [res, res, 3]
-            cross_attn_map = cross_attn_map.unsqueeze(-1).expand(*cross_attn_map.shape, 3)
+            # cross_attn_map = cross_attn_map.unsqueeze(-1).expand(*cross_attn_map.shape, 3)
+            cross_attn_map = paddle.unsqueeze(cross_attn_map, axis=-1)
+            cross_attn_map = paddle.expand(cross_attn_map, shape=[*cross_attn_map.shape[:-1], 3])
             # [3, res, res]
             cross_attn_map = cross_attn_map.permute(2, 0, 1).unsqueeze(0)
             # [3, clip_size, clip_size]
-            cross_attn_map = F.interpolate(cross_attn_map, size=image_size, mode='bicubic')
-            cross_attn_map = torch.clamp(cross_attn_map, min=0, max=255)
+            cross_attn_map = F_P.interpolate(cross_attn_map, size=[image_size, image_size], mode='bicubic')
+            cross_attn_map = paddle.clip(cross_attn_map, min=0, max=255)
             # rgb to gray
             cross_attn_map = rgb2gray(cross_attn_map.squeeze(0).permute(1, 2, 0)).astype(np.float32)
             # torch to numpy

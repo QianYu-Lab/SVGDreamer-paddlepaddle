@@ -3,14 +3,15 @@
 # Author: XiMing Xing
 # Description:
 
-from typing import Union, List
 from pathlib import Path
+from pprint import pprint
+from typing import List, Union
 
 import hydra
-from omegaconf import OmegaConf, DictConfig, open_dict
-from pprint import pprint
+import paddle
 import torch
 from accelerate import Accelerator
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 from .logging import build_sysout_print_logger
 
@@ -95,6 +96,10 @@ class ModelState:
     @property
     def device(self):
         return self.accelerator.device
+
+    @property
+    def p_device(self):
+        return "gpu" if paddle.device.is_compiled_with_cuda() else "cpu"
 
     @property
     def is_main_process(self):

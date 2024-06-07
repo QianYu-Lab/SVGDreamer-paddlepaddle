@@ -26,7 +26,8 @@ class VectorizedParticleSDSPipeline(torch.nn.Module):
                  diffuser_cfg: DictConfig,
                  guidance_cfg: DictConfig,
                  device: torch.device,
-                 dtype):
+                 dtype,
+                 precision,):
         super().__init__()
         self.device = device
         self.dtype = torch.float16 if precision == 'fp16' else torch.float32

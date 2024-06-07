@@ -8,3 +8,4 @@ from .component_painter_params import CompPainter, CompPainterOptimizer
 from .loss import xing_loss_fn
 from .VPSD_pipeline import VectorizedParticleSDSPipeline
 from .diffusion_pipeline import DiffusionPipeline
+from .diffusion_pipeline_paddle import DiffusionPipeline_Paddle
